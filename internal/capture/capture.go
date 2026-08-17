@@ -31,11 +31,11 @@ type Lister interface {
 	List(ctx context.Context) ([]wezterm.Pane, error)
 }
 
-// SessionResolver maps tty -> Proc (which panes run claude) and locates a
-// cwd's on-disk session.
+// SessionResolver maps tty -> Proc (which panes run claude) and attributes
+// on-disk sessions to those panes.
 type SessionResolver interface {
 	Procs(ctx context.Context) (map[string]session.Proc, error)
-	Locate(cwd, resumeID string) (session.ClaudeSession, bool)
+	Assign(panes []session.PaneProc) map[int]session.ClaudeSession
 }
 
 // Capture orchestrates one snapshot.
@@ -65,6 +65,8 @@ func (c *Capture) Run(ctx context.Context) (*snapshot.Snapshot, error) {
 }
 
 func (c *Capture) assemble(panes []wezterm.Pane, procs map[string]session.Proc) *snapshot.Snapshot {
+	claude := c.claudeLeaves(panes, procs)
+
 	// Group: window -> tab -> panes, preserving first-seen order.
 	type tabKey struct{ win, tab int }
 	winOrder := []int{}
@@ -101,7 +103,7 @@ func (c *Capture) assemble(panes []wezterm.Pane, procs map[string]session.Proc) 
 		activeTab, hasActive := activeTabByWin[win]
 		for i, tabID := range tabOrder[win] {
 			tp := byTab[tabKey{win, tabID}]
-			w.Tabs = append(w.Tabs, c.buildTab(tp, procs))
+			w.Tabs = append(w.Tabs, c.buildTab(tp, claude))
 			if hasActive && tabID == activeTab {
 				w.ActiveTabIndex = i
 			}
@@ -112,14 +114,19 @@ func (c *Capture) assemble(panes []wezterm.Pane, procs map[string]session.Proc) 
 	return snap
 }
 
-func (c *Capture) buildTab(panes []wezterm.Pane, procs map[string]session.Proc) snapshot.Tab {
+func (c *Capture) buildTab(panes []wezterm.Pane, claude map[int]*snapshot.ClaudeSession) snapshot.Tab {
 	rects := make([]layout.Rect, 0, len(panes))
 	leaves := map[int]snapshot.Leaf{}
 	for _, p := range panes {
 		rects = append(rects, layout.Rect{
 			ID: p.PaneID, Left: p.LeftCol, Top: p.TopRow, Cols: p.Size.Cols, Rows: p.Size.Rows,
 		})
-		leaves[p.PaneID] = c.leafFor(p, procs)
+		leaves[p.PaneID] = snapshot.Leaf{
+			CWD:    normalizeCWD(p.CWD),
+			Claude: claude[p.PaneID],
+			Cols:   p.Size.Cols,
+			Rows:   p.Size.Rows,
+		}
 	}
 	// node is the tab's layout tree; order is the leaf pane ids in canonical
 	// (left-to-right, depth-first) order, used to place active/zoomed indices.
@@ -186,26 +193,46 @@ func degenerateChain(rects []layout.Rect, leaves map[int]snapshot.Leaf) *snapsho
 	}
 }
 
-func (c *Capture) leafFor(p wezterm.Pane, procs map[string]session.Proc) snapshot.Leaf {
-	cwd := normalizeCWD(p.CWD)
-	leaf := snapshot.Leaf{CWD: cwd, Cols: p.Size.Cols, Rows: p.Size.Rows}
-	tty := strings.TrimPrefix(p.TTYName, "/dev/")
-	proc, running := procs[tty]
-	if !running {
-		return leaf
+// claudeLeaves resolves the Claude session for every pane running claude, keyed
+// by pane id. Resolution covers all panes in one pass rather than pane by pane,
+// because the answer for one pane constrains its neighbours: two panes sharing
+// a cwd are necessarily running two different sessions, and resolving them
+// independently gave both the same one -- so restore relaunched a single
+// session in two panes and lost the other.
+func (c *Capture) claudeLeaves(panes []wezterm.Pane, procs map[string]session.Proc) map[int]*snapshot.ClaudeSession {
+	reqs := make([]session.PaneProc, 0, len(panes))
+	for _, p := range panes {
+		proc, running := procs[strings.TrimPrefix(p.TTYName, "/dev/")]
+		if !running {
+			continue
+		}
+		reqs = append(reqs, session.PaneProc{
+			PaneID:    p.PaneID,
+			CWD:       normalizeCWD(p.CWD),
+			ResumeID:  proc.ResumeID,
+			StartedAt: proc.StartedAt,
+		})
 	}
-	if sess, ok := c.resolver.Locate(cwd, proc.ResumeID); ok {
-		leaf.Claude = &snapshot.ClaudeSession{
+
+	assigned := c.resolver.Assign(reqs)
+	out := make(map[int]*snapshot.ClaudeSession, len(reqs))
+	for _, req := range reqs {
+		sess, ok := assigned[req.PaneID]
+		if !ok {
+			// Claude is running on this pane's tty but no transcript could be
+			// attributed to it (stale --resume, foreign CLAUDE_CONFIG_DIR, a fresh
+			// session mid-init, or a neighbouring pane in the same cwd holding the
+			// only candidate). Mark it so restore relaunches claude bare rather
+			// than silently dropping the pane's claude-ness -- or worse, resuming a
+			// session another pane is already resuming.
+			out[req.PaneID] = &snapshot.ClaudeSession{Resumable: false}
+			continue
+		}
+		out[req.PaneID] = &snapshot.ClaudeSession{
 			SessionID:  sess.SessionID,
 			ProjectDir: sess.ProjectDir,
 			Resumable:  true,
 		}
-	} else {
-		// Claude is running on this pane's tty but no local transcript was
-		// found (stale --resume, foreign CLAUDE_CONFIG_DIR, a fresh session
-		// mid-init, etc). Mark it so restore relaunches claude bare rather
-		// than silently dropping the pane's claude-ness.
-		leaf.Claude = &snapshot.ClaudeSession{Resumable: false}
 	}
-	return leaf
+	return out
 }
