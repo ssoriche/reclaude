@@ -3,8 +3,11 @@ package capture
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/ssoriche/reclaude/internal/session"
 	"github.com/ssoriche/reclaude/internal/snapshot"
@@ -32,8 +35,8 @@ type fakeLister struct {
 func (f fakeLister) List(context.Context) ([]wezterm.Pane, error) { return f.panes, f.err }
 
 // fakeResolver implements capture.SessionResolver. procs is the tty->Proc map
-// (which ttys are running claude); locate is consulted for each pane whose
-// tty is in procs, keyed by "<cwd>|<resumeID>".
+// (which ttys are running claude); locate answers the assignment for each pane
+// whose tty is in procs, keyed by "<cwd>|<resumeID>".
 type fakeResolver struct {
 	procs   map[string]session.Proc
 	locate  map[string]session.ClaudeSession
@@ -44,9 +47,95 @@ func (f fakeResolver) Procs(context.Context) (map[string]session.Proc, error) {
 	return f.procs, f.procErr
 }
 
-func (f fakeResolver) Locate(cwd, resumeID string) (session.ClaudeSession, bool) {
-	sess, ok := f.locate[cwd+"|"+resumeID]
-	return sess, ok
+func (f fakeResolver) Assign(panes []session.PaneProc) map[int]session.ClaudeSession {
+	out := make(map[int]session.ClaudeSession, len(panes))
+	for _, p := range panes {
+		if sess, ok := f.locate[p.CWD+"|"+p.ResumeID]; ok {
+			out[p.PaneID] = sess
+		}
+	}
+	return out
+}
+
+// realAssignResolver pairs canned procs with the real attribution logic, so a
+// capture-level test exercises the actual assignment rules rather than a stub.
+type realAssignResolver struct {
+	procs map[string]session.Proc
+	real  *session.Resolver
+}
+
+func (r realAssignResolver) Procs(context.Context) (map[string]session.Proc, error) {
+	return r.procs, nil
+}
+
+func (r realAssignResolver) Assign(panes []session.PaneProc) map[int]session.ClaudeSession {
+	return r.real.Assign(panes)
+}
+
+// writeTranscript writes a transcript whose recorded session start is at,
+// mirroring the untimestamped header Claude writes at the top of a .jsonl.
+func writeTranscript(t *testing.T, dir, sessionID string, at time.Time) {
+	t.Helper()
+	body := `{"type":"last-prompt","sessionId":"` + sessionID + `"}` + "\n" +
+		`{"type":"attachment","timestamp":"` + at.UTC().Format(time.RFC3339Nano) + `"}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, sessionID+".jsonl"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Regression: two tabs in one directory, each running its own bare `claude`,
+// were resolved independently and both took the newest transcript. A restore
+// then resumed that one session twice and lost the other session entirely.
+func TestCaptureGivesTabsSharingACWDDistinctSessions(t *testing.T) {
+	root := t.TempDir()
+	cwd := "/Volumes/proj"
+	projectDir := filepath.Join(root, session.SlugFor(cwd))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	base := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	writeTranscript(t, projectDir, "sess-early", base.Add(2*time.Second))
+	writeTranscript(t, projectDir, "sess-late", base.Add(time.Hour+2*time.Second))
+
+	// Two tabs in one window, same cwd, neither launched with --resume.
+	panes := []wezterm.Pane{
+		{WindowID: 0, TabID: 0, PaneID: 1, Size: wezterm.Size{Cols: 80, Rows: 24},
+			CWD: "file://h" + cwd, TTYName: "/dev/ttys003", IsActive: true, WindowTitle: "W"},
+		{WindowID: 0, TabID: 1, PaneID: 2, Size: wezterm.Size{Cols: 80, Rows: 24},
+			CWD: "file://h" + cwd, TTYName: "/dev/ttys004", WindowTitle: "W"},
+	}
+	resolver := realAssignResolver{
+		procs: map[string]session.Proc{
+			"ttys003": {StartedAt: base},
+			"ttys004": {StartedAt: base.Add(time.Hour)},
+		},
+		real: session.New(nil, root),
+	}
+
+	snap, err := New(fakeLister{panes: panes}, resolver, "stamp", "ver").Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	got := map[int]string{}
+	for i, tab := range snap.Windows[0].Tabs {
+		if tab.Layout == nil || tab.Layout.Pane == nil || tab.Layout.Pane.Claude == nil {
+			t.Fatalf("tab %d has no claude leaf: %+v", i, tab.Layout)
+		}
+		c := tab.Layout.Pane.Claude
+		if !c.Resumable {
+			t.Fatalf("tab %d is not resumable, want a distinct session", i)
+		}
+		got[i] = c.SessionID
+	}
+
+	if got[0] == got[1] {
+		t.Fatalf("both tabs captured the same session %q", got[0])
+	}
+	if got[0] != "sess-early" || got[1] != "sess-late" {
+		t.Fatalf("sessions = %v, want tab0=sess-early tab1=sess-late", got)
+	}
 }
 
 func TestCaptureBuildsSnapshot(t *testing.T) {
@@ -95,7 +184,7 @@ func TestCaptureClaudeRunningButNoLocalTranscriptIsBareRelaunchMarker(t *testing
 	}
 	resolver := fakeResolver{
 		procs:  map[string]session.Proc{"ttys003": {}},
-		locate: map[string]session.ClaudeSession{}, // Locate returns ok=false for everything
+		locate: map[string]session.ClaudeSession{}, // nothing is assignable
 	}
 	c := New(fakeLister{panes: panes}, resolver, "stamp", "v")
 	snap, err := c.Run(context.Background())

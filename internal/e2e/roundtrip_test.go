@@ -34,9 +34,14 @@ func (f fakeResolver) Procs(context.Context) (map[string]session.Proc, error) {
 	return f.procs, nil
 }
 
-func (f fakeResolver) Locate(cwd, resumeID string) (session.ClaudeSession, bool) {
-	sess, ok := f.locate[cwd+"|"+resumeID]
-	return sess, ok
+func (f fakeResolver) Assign(panes []session.PaneProc) map[int]session.ClaudeSession {
+	out := make(map[int]session.ClaudeSession, len(panes))
+	for _, p := range panes {
+		if sess, ok := f.locate[p.CWD+"|"+p.ResumeID]; ok {
+			out[p.PaneID] = sess
+		}
+	}
+	return out
 }
 
 // splitCall records one SplitPane invocation.
