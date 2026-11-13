@@ -19,6 +19,12 @@ func TestNormalizeCWD(t *testing.T) {
 		"file://mac.local/Volumes/zr/proj": "/Volumes/zr/proj",
 		"file:///Users/x/code":             "/Users/x/code",
 		"/already/plain":                   "/already/plain",
+		// WezTerm on Linux reports directory URLs with a trailing slash; the
+		// slug must not pick up a trailing '-'.
+		"file:///home/x/code/":          "/home/x/code",
+		"file://host/home/x/my%20code/": "/home/x/my code",
+		"/already/plain/":               "/already/plain",
+		"":                              "",
 	}
 	for in, want := range cases {
 		if got := normalizeCWD(in); got != want {
@@ -110,7 +116,7 @@ func TestCaptureGivesTabsSharingACWDDistinctSessions(t *testing.T) {
 			"ttys003": {StartedAt: base},
 			"ttys004": {StartedAt: base.Add(time.Hour)},
 		},
-		real: session.New(nil, root),
+		real: session.New(nil, root, t.TempDir()),
 	}
 
 	snap, err := New(fakeLister{panes: panes}, resolver, "stamp", "ver").Run(context.Background())

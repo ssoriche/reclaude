@@ -50,7 +50,7 @@ func TestInstallWritesPlistAndBootstraps(t *testing.T) {
 	f := &iexec.FakeRunner{Responses: map[string]iexec.FakeResponse{
 		"launchctl bootstrap gui/501 " + plist: {},
 	}}
-	err := Install(context.Background(), f, plist, "/bin/reclaude", "/log/daemon.log", "501")
+	err := InstallLaunchd(context.Background(), f, plist, "/bin/reclaude", "/log/daemon.log", "501")
 	if err != nil {
 		t.Fatalf("Install: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestInstallToleratesNoExistingService(t *testing.T) {
 	f := &iexec.FakeRunner{Responses: map[string]iexec.FakeResponse{
 		"launchctl bootstrap gui/501 " + plist: {},
 	}}
-	if err := Install(context.Background(), f, plist, "/bin/reclaude", "/log/daemon.log", "501"); err != nil {
+	if err := InstallLaunchd(context.Background(), f, plist, "/bin/reclaude", "/log/daemon.log", "501"); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
 }
@@ -100,7 +100,7 @@ func TestUninstallRemovesPlistAndBootsOut(t *testing.T) {
 	f := &iexec.FakeRunner{Responses: map[string]iexec.FakeResponse{
 		"launchctl bootout gui/501/" + Label: {},
 	}}
-	if err := Uninstall(context.Background(), f, plist, "501"); err != nil {
+	if err := UninstallLaunchd(context.Background(), f, plist, "501"); err != nil {
 		t.Fatalf("Uninstall: %v", err)
 	}
 	if _, err := os.Stat(plist); !os.IsNotExist(err) {
@@ -121,7 +121,7 @@ func TestUninstallToleratesNotLoaded(t *testing.T) {
 	// ErrNoFakeResponse, simulating launchctl's nonzero exit for "service
 	// not loaded".
 	f := &iexec.FakeRunner{Responses: map[string]iexec.FakeResponse{}}
-	if err := Uninstall(context.Background(), f, plist, "501"); err != nil {
+	if err := UninstallLaunchd(context.Background(), f, plist, "501"); err != nil {
 		t.Fatalf("Uninstall: %v", err)
 	}
 	if _, err := os.Stat(plist); !os.IsNotExist(err) {

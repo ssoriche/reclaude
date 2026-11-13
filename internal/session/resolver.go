@@ -2,16 +2,23 @@
 //
 // Claude does not hold its session .jsonl file open, so the session cannot be
 // found via lsof, nor does it publish the session id in the process
-// environment. Instead a session transcript lives at
+// environment. A session transcript lives at
 // ~/.claude/projects/<slug>/<session-id>.jsonl, where <slug> is derived from
 // the pane's cwd (see SlugFor).
 //
-// Attribution therefore rests on two signals. An explicit `claude --resume
-// <id>` hint from argv names the session outright, and is authoritative when
-// its file still exists (it can be stale). Otherwise the pane is running a
-// session it started itself, so its transcript is the one whose first recorded
-// timestamp falls just after the claude process started -- in practice within
-// a couple of seconds of it.
+// Attribution rests on three signals, strongest first:
+//
+//  1. The session registry: a running claude keeps ~/.claude/sessions/<pid>.json
+//     naming the session it is running right now. This is the only signal that
+//     survives the interactive `--resume` picker, `--resume <name>`, and an
+//     in-session /resume or /clear.
+//  2. An explicit `claude --resume <id>` hint from argv.
+//  3. Start-time matching: a pane running a session it started itself owns the
+//     transcript whose first recorded timestamp falls just after the claude
+//     process started -- in practice within a couple of seconds of it.
+//
+// Signals 1 and 2 are authoritative only when the named transcript still
+// exists in the pane's project dir; otherwise the next signal is tried.
 //
 // Attribution is done for all panes at once (see Assign) rather than one pane
 // at a time, because the answer for one pane constrains the answer for its
@@ -22,9 +29,11 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -51,7 +60,8 @@ type ClaudeSession struct {
 
 // Proc is a running claude process, keyed by tty.
 type Proc struct {
-	ResumeID  string    // from --resume <id>/--resume=<id> in argv, or "" if absent.
+	SessionID string    // from the session registry, or "" if the process has no usable record.
+	ResumeID  string    // from --resume <id>/--resume=<id>/-r <id> in argv, or "" if absent.
 	StartedAt time.Time // when the process started; zero if ps gave no usable elapsed time.
 }
 
@@ -59,6 +69,7 @@ type Proc struct {
 type PaneProc struct {
 	PaneID    int
 	CWD       string
+	SessionID string // registry session id; see Proc.SessionID.
 	ResumeID  string
 	StartedAt time.Time
 }
@@ -67,12 +78,14 @@ type PaneProc struct {
 type Resolver struct {
 	run          iexec.Runner
 	projectsRoot string // e.g. $HOME/.claude/projects
+	sessionsDir  string // e.g. $HOME/.claude/sessions
 	now          func() time.Time
 }
 
-// New returns a Resolver. projectsRoot is injected for testability.
-func New(r iexec.Runner, projectsRoot string) *Resolver {
-	return &Resolver{run: r, projectsRoot: projectsRoot, now: time.Now}
+// New returns a Resolver. projectsRoot and sessionsDir are injected for
+// testability.
+func New(r iexec.Runner, projectsRoot, sessionsDir string) *Resolver {
+	return &Resolver{run: r, projectsRoot: projectsRoot, sessionsDir: sessionsDir, now: time.Now}
 }
 
 // Procs returns a map from tty name (e.g. "ttys003") to Proc, for every
@@ -85,7 +98,7 @@ func (r *Resolver) Procs(ctx context.Context) (map[string]Proc, error) {
 	now := r.now()
 	result := map[string]Proc{}
 	for line := range strings.SplitSeq(string(out), "\n") {
-		_, tty, elapsed, cmd, ok := parsePS(line)
+		pid, tty, elapsed, cmd, ok := parsePS(line)
 		if !ok || !isClaude(cmd) {
 			continue
 		}
@@ -93,9 +106,45 @@ func (r *Resolver) Procs(ctx context.Context) (map[string]Proc, error) {
 		if d, ok := parseElapsed(elapsed); ok {
 			p.StartedAt = now.Add(-d)
 		}
+		id, err := r.registrySession(pid, p.StartedAt)
+		if err != nil {
+			return nil, err
+		}
+		p.SessionID = id
 		result[tty] = p
 	}
 	return result, nil
+}
+
+// registryRecord is the subset of ~/.claude/sessions/<pid>.json reclaude uses.
+type registryRecord struct {
+	SessionID string `json:"sessionId"`
+	StartedAt int64  `json:"startedAt"` // unix milliseconds
+}
+
+// registrySession returns the session id recorded for pid in the session
+// registry, or "" if there is no record (an older claude, or one that has not
+// written it yet). A record stamped before the process started was left by an
+// earlier process that held the same pid, and is ignored. Claude writes its
+// record seconds to minutes after exec, so only that lower bound is checked.
+// A record that exists but cannot be read or decoded is an error.
+func (r *Resolver) registrySession(pid string, procStarted time.Time) (string, error) {
+	path := filepath.Join(r.sessionsDir, pid+".json")
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("session: read registry: %w", err)
+	}
+	var rec registryRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return "", fmt.Errorf("session: decode registry %s: %w", path, err)
+	}
+	if !procStarted.IsZero() && time.UnixMilli(rec.StartedAt).Before(procStarted.Add(-startSlack)) {
+		return "", nil
+	}
+	return rec.SessionID, nil
 }
 
 // Assign attributes an on-disk session to each pane, guaranteeing that no
@@ -132,20 +181,17 @@ func assignDir(projectDir string, panes []PaneProc, out map[int]ClaudeSession) {
 	claimed := map[string]bool{}
 	unhinted := make([]PaneProc, 0, len(panes))
 
-	// An explicit hint names the session outright. Claim it first so start-time
-	// matching cannot hand the same session to a neighbouring pane.
+	// An explicit hint (registry, then argv) names the session outright. Claim
+	// it first so start-time matching cannot hand the same session to a
+	// neighbouring pane. A hint whose transcript is gone is stale and is skipped.
 	for _, p := range panes {
-		if p.ResumeID == "" {
+		id, ok := firstExistingSession(projectDir, p.SessionID, p.ResumeID)
+		if !ok {
 			unhinted = append(unhinted, p)
 			continue
 		}
-		info, err := os.Stat(filepath.Join(projectDir, p.ResumeID+".jsonl"))
-		if err != nil || !info.Mode().IsRegular() {
-			unhinted = append(unhinted, p) // stale hint; fall back to matching
-			continue
-		}
-		out[p.PaneID] = ClaudeSession{SessionID: p.ResumeID, ProjectDir: projectDir}
-		claimed[p.ResumeID] = true
+		out[p.PaneID] = ClaudeSession{SessionID: id, ProjectDir: projectDir}
+		claimed[id] = true
 	}
 	if len(unhinted) == 0 {
 		return
@@ -178,6 +224,21 @@ func assignDir(projectDir string, panes []PaneProc, out map[int]ClaudeSession) {
 		out[unhinted[best].PaneID] = ClaudeSession{SessionID: tr.sessionID, ProjectDir: projectDir}
 		claimed[tr.sessionID] = true
 	}
+}
+
+// firstExistingSession returns the first non-empty id whose transcript is a
+// regular file in projectDir.
+func firstExistingSession(projectDir string, ids ...string) (string, bool) {
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		info, err := os.Stat(filepath.Join(projectDir, id+".jsonl"))
+		if err == nil && info.Mode().IsRegular() {
+			return id, true
+		}
+	}
+	return "", false
 }
 
 // betterMatch reports whether p is a closer owner for a transcript than cur:
@@ -331,15 +392,20 @@ func isClaude(cmd string) bool {
 	return filepath.Base(fields[0]) == "claude"
 }
 
-// resumeIDFromArgv extracts the session id from `--resume <id>` or
-// `--resume=<id>` in a claude command line. Returns "" if absent.
+// resumeIDFromArgv extracts the session id from `--resume <id>`,
+// `--resume=<id>`, or `-r <id>` in a claude command line. Returns "" if absent,
+// if the flag has no value (the interactive picker), or if --fork-session is
+// present: a forked process runs a new session, not the one it names.
 func resumeIDFromArgv(cmd string) string {
 	fields := strings.Fields(cmd)
+	if slices.Contains(fields, "--fork-session") {
+		return ""
+	}
 	for i, f := range fields {
 		if id, ok := strings.CutPrefix(f, "--resume="); ok {
 			return id
 		}
-		if f == "--resume" && i+1 < len(fields) {
+		if (f == "--resume" || f == "-r") && i+1 < len(fields) && !strings.HasPrefix(fields[i+1], "-") {
 			return fields[i+1]
 		}
 	}

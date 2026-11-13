@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"syscall"
 	"time"
@@ -206,12 +207,15 @@ func cmdDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		_, _ = fmt.Fprintln(stderr, err)
 		return 1
 	}
-	plistPath := filepath.Join(dir, daemon.Label+".plist")
 	logPath := filepath.Join(dir, "daemon.log")
-	uid := strconv.Itoa(os.Getuid())
 
 	switch args[0] {
 	case "install":
+		svc, err := platformService(runtime.GOOS, dir, iexec.OSRunner{})
+		if err != nil {
+			_, _ = fmt.Fprintln(stderr, err)
+			return 1
+		}
 		bin, err := os.Executable()
 		if err != nil {
 			_, _ = fmt.Fprintln(stderr, err)
@@ -221,14 +225,19 @@ func cmdDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			_, _ = fmt.Fprintln(stderr, err)
 			return 1
 		}
-		if err := daemon.Install(ctx, iexec.OSRunner{}, plistPath, bin, logPath, uid); err != nil {
+		if err := svc.install(ctx, bin, logPath); err != nil {
 			_, _ = fmt.Fprintln(stderr, err)
 			return 1
 		}
-		_, _ = fmt.Fprintln(stdout, "daemon installed:", plistPath)
+		_, _ = fmt.Fprintln(stdout, "daemon installed:", svc.path)
 		return 0
 	case "uninstall":
-		if err := daemon.Uninstall(ctx, iexec.OSRunner{}, plistPath, uid); err != nil {
+		svc, err := platformService(runtime.GOOS, dir, iexec.OSRunner{})
+		if err != nil {
+			_, _ = fmt.Fprintln(stderr, err)
+			return 1
+		}
+		if err := svc.uninstall(ctx); err != nil {
 			_, _ = fmt.Fprintln(stderr, err)
 			return 1
 		}
@@ -258,6 +267,53 @@ func cmdDaemon(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	default:
 		_, _ = fmt.Fprintf(stderr, "unknown daemon subcommand: %s\n", args[0])
 		return 2
+	}
+}
+
+// service is the platform's per-user background service for `daemon run`.
+type service struct {
+	path      string // the installed definition (plist or unit file)
+	install   func(ctx context.Context, bin, logPath string) error
+	uninstall func(ctx context.Context) error
+}
+
+// platformService returns the service manager for goos: a launchd
+// LaunchAgent on macOS, a systemd user unit on Linux. Other platforms are an
+// error rather than a silent no-op.
+func platformService(goos, stateDir string, run iexec.Runner) (*service, error) {
+	switch goos {
+	case "darwin":
+		plist := filepath.Join(stateDir, daemon.Label+".plist")
+		uid := strconv.Itoa(os.Getuid())
+		return &service{
+			path: plist,
+			install: func(ctx context.Context, bin, logPath string) error {
+				return daemon.InstallLaunchd(ctx, run, plist, bin, logPath, uid)
+			},
+			uninstall: func(ctx context.Context) error {
+				return daemon.UninstallLaunchd(ctx, run, plist, uid)
+			},
+		}, nil
+	case "linux":
+		unit, err := app.SystemdUnitPath()
+		if err != nil {
+			return nil, err
+		}
+		return &service{
+			path: unit,
+			install: func(ctx context.Context, bin, logPath string) error {
+				pathEnv := os.Getenv("PATH")
+				if pathEnv == "" {
+					return errors.New("daemon install: PATH is empty; it is baked into the unit so the daemon can find wezterm and ps")
+				}
+				return daemon.InstallSystemd(ctx, run, unit, bin, logPath, pathEnv)
+			},
+			uninstall: func(ctx context.Context) error {
+				return daemon.UninstallSystemd(ctx, run, unit)
+			},
+		}, nil
+	default:
+		return nil, fmt.Errorf("daemon install/uninstall is not supported on %s (only darwin and linux)", goos)
 	}
 }
 

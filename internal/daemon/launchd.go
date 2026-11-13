@@ -10,7 +10,7 @@ import (
 	iexec "github.com/ssoriche/reclaude/internal/exec"
 )
 
-// Label is the LaunchAgent label.
+// Label is the LaunchAgent label (macOS).
 const Label = "net.reclaude.daemon"
 
 // escapeXML makes s safe to interpolate into plist character data (e.g. a
@@ -55,11 +55,11 @@ func bootout(ctx context.Context, run iexec.Runner, uid string) {
 	_, _ = run.Run(ctx, "launchctl", "bootout", "gui/"+uid+"/"+Label)
 }
 
-// Install writes the plist and bootstraps it into the user's gui domain. It
+// InstallLaunchd writes the plist and bootstraps it into the user's gui domain. It
 // first best-effort boots out any existing registration under this label so
 // re-running install (e.g. after rebuilding the binary) doesn't fail with
 // "already bootstrapped".
-func Install(ctx context.Context, run iexec.Runner, plistPath, binPath, logPath, uid string) error {
+func InstallLaunchd(ctx context.Context, run iexec.Runner, plistPath, binPath, logPath, uid string) error {
 	bootout(ctx, run, uid)
 	if err := os.WriteFile(plistPath, []byte(renderPlist(binPath, logPath)), 0o644); err != nil {
 		return fmt.Errorf("daemon: write plist: %w", err)
@@ -70,12 +70,12 @@ func Install(ctx context.Context, run iexec.Runner, plistPath, binPath, logPath,
 	return nil
 }
 
-// Uninstall boots out the agent and removes the plist. A bootout failure
+// UninstallLaunchd boots out the agent and removes the plist. A bootout failure
 // (the LaunchAgent isn't currently loaded) is tolerated in the same spirit
 // as the os.IsNotExist tolerance below for an already-removed plist: either
-// way, the end state Uninstall promises — nothing loaded, no plist file —
+// way, the end state UninstallLaunchd promises — nothing loaded, no plist file —
 // is already achieved.
-func Uninstall(ctx context.Context, run iexec.Runner, plistPath, uid string) error {
+func UninstallLaunchd(ctx context.Context, run iexec.Runner, plistPath, uid string) error {
 	bootout(ctx, run, uid)
 	if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("daemon: remove plist: %w", err)

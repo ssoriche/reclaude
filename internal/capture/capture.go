@@ -5,6 +5,8 @@ package capture
 import (
 	"context"
 	"log"
+	"net/url"
+	"path/filepath"
 	"strings"
 
 	"github.com/ssoriche/reclaude/internal/layout"
@@ -13,17 +15,26 @@ import (
 	"github.com/ssoriche/reclaude/internal/wezterm"
 )
 
-// normalizeCWD converts WezTerm's file://<host>/<path> to a plain path.
+// normalizeCWD converts WezTerm's file://<host>/<path> to a plain, cleaned
+// path: percent-escapes are decoded and any trailing slash is dropped (WezTerm
+// on Linux reports directories as "file:///home/x/"), since the result feeds
+// session.SlugFor and must match the cwd Claude itself recorded.
 func normalizeCWD(cwd string) string {
+	if cwd == "" {
+		return ""
+	}
 	if !strings.HasPrefix(cwd, "file://") {
+		return filepath.Clean(cwd)
+	}
+	u, err := url.Parse(cwd)
+	if err != nil {
+		log.Printf("reclaude: unparseable pane cwd %q, using it verbatim: %v", cwd, err)
 		return cwd
 	}
-	rest := strings.TrimPrefix(cwd, "file://")
-	// rest is "<host>/<path>" or "/<path>" (empty host). Cut at the first '/'.
-	if i := strings.IndexByte(rest, '/'); i >= 0 {
-		return rest[i:]
+	if u.Path == "" {
+		return "/"
 	}
-	return "/" + rest
+	return filepath.Clean(u.Path)
 }
 
 // Lister lists WezTerm panes.
@@ -209,6 +220,7 @@ func (c *Capture) claudeLeaves(panes []wezterm.Pane, procs map[string]session.Pr
 		reqs = append(reqs, session.PaneProc{
 			PaneID:    p.PaneID,
 			CWD:       normalizeCWD(p.CWD),
+			SessionID: proc.SessionID,
 			ResumeID:  proc.ResumeID,
 			StartedAt: proc.StartedAt,
 		})
