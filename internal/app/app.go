@@ -114,6 +114,9 @@ func NewCapture(ctx context.Context, now time.Time) (*capture.Capture, *snapshot
 	if err != nil {
 		return nil, nil, err
 	}
+	if err := EnsureGUISocket(); err != nil {
+		return nil, nil, err
+	}
 	run := iexec.OSRunner{}
 	client := wezterm.New(run)
 	resolver := session.New(run, projects, sessions)
@@ -126,9 +129,12 @@ func NewCapture(ctx context.Context, now time.Time) (*capture.Capture, *snapshot
 }
 
 // NewRestore wires the real Terminal for a restore.
-func NewRestore() *restore.Restore {
+func NewRestore() (*restore.Restore, error) {
+	if err := EnsureGUISocket(); err != nil {
+		return nil, err
+	}
 	client := wezterm.New(iexec.OSRunner{})
-	return restore.New(client, fileExists)
+	return restore.New(client, fileExists), nil
 }
 
 func fileExists(path string) bool {

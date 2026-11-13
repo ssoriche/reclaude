@@ -103,7 +103,11 @@ func cmdRestore(ctx context.Context, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 1
 	}
-	r := app.NewRestore()
+	r, err := app.NewRestore()
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
 	return runRestore(ctx, stdout, stderr, store, r.Run)
 }
 
