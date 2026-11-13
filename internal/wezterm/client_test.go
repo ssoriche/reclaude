@@ -15,7 +15,7 @@ func TestClientListParsesFixture(t *testing.T) {
 		t.Fatalf("read fixture: %v", err)
 	}
 	f := &iexec.FakeRunner{Responses: map[string]iexec.FakeResponse{
-		"wezterm cli list --format json": {Stdout: data},
+		"wezterm cli --no-auto-start list --format json": {Stdout: data},
 	}}
 	c := New(f)
 	panes, err := c.List(context.Background())
@@ -33,7 +33,7 @@ func TestClientListParsesFixture(t *testing.T) {
 
 func TestClientListNotRunning(t *testing.T) {
 	f := &iexec.FakeRunner{Responses: map[string]iexec.FakeResponse{
-		"wezterm cli list --format json": {Err: errors.New("exit status 1")},
+		"wezterm cli --no-auto-start list --format json": {Err: errors.New("exit status 1")},
 	}}
 	if _, err := New(f).List(context.Background()); !errors.Is(err, ErrNotRunning) {
 		t.Fatalf("want ErrNotRunning, got %v", err)
@@ -42,7 +42,7 @@ func TestClientListNotRunning(t *testing.T) {
 
 func TestClientListContextCanceled(t *testing.T) {
 	f := &iexec.FakeRunner{Responses: map[string]iexec.FakeResponse{
-		"wezterm cli list --format json": {Err: errors.New("exit status 1")},
+		"wezterm cli --no-auto-start list --format json": {Err: errors.New("exit status 1")},
 	}}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -57,7 +57,7 @@ func TestClientListContextCanceled(t *testing.T) {
 
 func TestSpawnNewWindowParsesPaneID(t *testing.T) {
 	f := &iexec.FakeRunner{Responses: map[string]iexec.FakeResponse{
-		"wezterm cli spawn --new-window --cwd /home/x": {Stdout: []byte("12\n")},
+		"wezterm cli --no-auto-start spawn --new-window --cwd /home/x": {Stdout: []byte("12\n")},
 	}}
 	c := New(f)
 	id, err := c.SpawnWindow(context.Background(), "/home/x")
@@ -71,7 +71,7 @@ func TestSpawnNewWindowParsesPaneID(t *testing.T) {
 
 func TestSplitPaneBuildsCommand(t *testing.T) {
 	f := &iexec.FakeRunner{Responses: map[string]iexec.FakeResponse{
-		"wezterm cli split-pane --pane-id 3 --right --percent 50 --cwd /w": {Stdout: []byte("4\n")},
+		"wezterm cli --no-auto-start split-pane --pane-id 3 --right --percent 50 --cwd /w": {Stdout: []byte("4\n")},
 	}}
 	c := New(f)
 	id, err := c.SplitPane(context.Background(), 3, DirRight, 50, "/w")
@@ -85,7 +85,7 @@ func TestSplitPaneBuildsCommand(t *testing.T) {
 
 func TestSplitPaneBottomBuildsCommand(t *testing.T) {
 	f := &iexec.FakeRunner{Responses: map[string]iexec.FakeResponse{
-		"wezterm cli split-pane --pane-id 3 --bottom --percent 30 --cwd /w": {Stdout: []byte("9\n")},
+		"wezterm cli --no-auto-start split-pane --pane-id 3 --bottom --percent 30 --cwd /w": {Stdout: []byte("9\n")},
 	}}
 	c := New(f)
 	id, err := c.SplitPane(context.Background(), 3, DirBottom, 30, "/w")
@@ -99,7 +99,7 @@ func TestSplitPaneBottomBuildsCommand(t *testing.T) {
 
 func TestSpawnTabBuildsCommand(t *testing.T) {
 	f := &iexec.FakeRunner{Responses: map[string]iexec.FakeResponse{
-		"wezterm cli spawn --window-id 7 --cwd /home/y": {Stdout: []byte("13\n")},
+		"wezterm cli --no-auto-start spawn --window-id 7 --cwd /home/y": {Stdout: []byte("13\n")},
 	}}
 	c := New(f)
 	id, err := c.SpawnTab(context.Background(), 7, "/home/y")
@@ -113,7 +113,7 @@ func TestSpawnTabBuildsCommand(t *testing.T) {
 
 func TestSendTextBuildsCommand(t *testing.T) {
 	f := &iexec.FakeRunner{Responses: map[string]iexec.FakeResponse{
-		"wezterm cli send-text --pane-id 5 --no-paste claude --resume abc\n": {},
+		"wezterm cli --no-auto-start send-text --pane-id 5 --no-paste claude --resume abc\n": {},
 	}}
 	c := New(f)
 	if err := c.SendText(context.Background(), 5, "claude --resume abc\n"); err != nil {
@@ -123,7 +123,7 @@ func TestSendTextBuildsCommand(t *testing.T) {
 
 func TestSetTabTitleBuildsCommand(t *testing.T) {
 	f := &iexec.FakeRunner{Responses: map[string]iexec.FakeResponse{
-		"wezterm cli set-tab-title --pane-id 5 my title": {},
+		"wezterm cli --no-auto-start set-tab-title --pane-id 5 my title": {},
 	}}
 	c := New(f)
 	if err := c.SetTabTitle(context.Background(), 5, "my title"); err != nil {
@@ -134,7 +134,7 @@ func TestSetTabTitleBuildsCommand(t *testing.T) {
 func TestWindowIDForPane(t *testing.T) {
 	data, _ := os.ReadFile("testdata/list.json")
 	f := &iexec.FakeRunner{Responses: map[string]iexec.FakeResponse{
-		"wezterm cli list --format json": {Stdout: data},
+		"wezterm cli --no-auto-start list --format json": {Stdout: data},
 	}}
 	c := New(f)
 	panes, _ := c.List(context.Background())
@@ -151,7 +151,7 @@ func TestWindowIDForPane(t *testing.T) {
 func TestWindowIDForPaneNotFound(t *testing.T) {
 	data, _ := os.ReadFile("testdata/list.json")
 	f := &iexec.FakeRunner{Responses: map[string]iexec.FakeResponse{
-		"wezterm cli list --format json": {Stdout: data},
+		"wezterm cli --no-auto-start list --format json": {Stdout: data},
 	}}
 	c := New(f)
 	if _, err := c.WindowIDForPane(context.Background(), -999999); err == nil {
@@ -161,7 +161,7 @@ func TestWindowIDForPaneNotFound(t *testing.T) {
 
 func TestActivatePaneBuildsCommand(t *testing.T) {
 	f := &iexec.FakeRunner{Responses: map[string]iexec.FakeResponse{
-		"wezterm cli activate-pane --pane-id 5": {},
+		"wezterm cli --no-auto-start activate-pane --pane-id 5": {},
 	}}
 	c := New(f)
 	if err := c.ActivatePane(context.Background(), 5); err != nil {
@@ -171,7 +171,7 @@ func TestActivatePaneBuildsCommand(t *testing.T) {
 
 func TestActivateTabBuildsCommand(t *testing.T) {
 	f := &iexec.FakeRunner{Responses: map[string]iexec.FakeResponse{
-		"wezterm cli activate-tab --pane-id 5": {},
+		"wezterm cli --no-auto-start activate-tab --pane-id 5": {},
 	}}
 	c := New(f)
 	if err := c.ActivateTab(context.Background(), 5); err != nil {
@@ -181,7 +181,7 @@ func TestActivateTabBuildsCommand(t *testing.T) {
 
 func TestSetWindowTitleBuildsCommand(t *testing.T) {
 	f := &iexec.FakeRunner{Responses: map[string]iexec.FakeResponse{
-		"wezterm cli set-window-title --pane-id 5 my window title": {},
+		"wezterm cli --no-auto-start set-window-title --pane-id 5 my window title": {},
 	}}
 	c := New(f)
 	if err := c.SetWindowTitle(context.Background(), 5, "my window title"); err != nil {
@@ -191,7 +191,7 @@ func TestSetWindowTitleBuildsCommand(t *testing.T) {
 
 func TestZoomPaneBuildsCommand(t *testing.T) {
 	f := &iexec.FakeRunner{Responses: map[string]iexec.FakeResponse{
-		"wezterm cli zoom-pane --pane-id 5 --zoom": {},
+		"wezterm cli --no-auto-start zoom-pane --pane-id 5 --zoom": {},
 	}}
 	c := New(f)
 	if err := c.ZoomPane(context.Background(), 5); err != nil {

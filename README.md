@@ -89,6 +89,14 @@ moving the binary.
 the user manager's default `PATH` often lacks `wezterm`. Check it with
 `systemctl --user status reclaude`.
 
+Under a service manager `WEZTERM_UNIX_SOCKET` is unset, and `wezterm cli`'s
+own GUI lookup (a symlink keyed by `$DISPLAY`) often misses. So when that
+variable is unset, reclaude looks for the one live `gui-sock-*` in
+`$XDG_RUNTIME_DIR/wezterm` or `~/.local/share/wezterm` and uses that. If
+several WezTerm GUIs are running it errors out; set `WEZTERM_UNIX_SOCKET` to
+pick one. Every `wezterm cli` call passes `--no-auto-start`, so reclaude never
+starts a headless mux server and captures its empty layout by mistake.
+
 To remove it:
 
 ```bash
