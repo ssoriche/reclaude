@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -31,7 +32,7 @@ func TestProcsParsesResumeIDAndFiltersNonClaude(t *testing.T) {
 	f := &iexec.FakeRunner{Responses: map[string]iexec.FakeResponse{
 		"ps -axo pid,tty,etime,command": {Stdout: []byte(ps)},
 	}}
-	r := New(f, "/Users/x/.claude/projects")
+	r := New(f, "/Users/x/.claude/projects", t.TempDir())
 	got, err := r.Procs(context.Background())
 	if err != nil {
 		t.Fatalf("Procs: %v", err)
@@ -60,7 +61,7 @@ func TestProcsSupportsResumeEqualsForm(t *testing.T) {
 	f := &iexec.FakeRunner{Responses: map[string]iexec.FakeResponse{
 		"ps -axo pid,tty,etime,command": {Stdout: []byte(ps)},
 	}}
-	r := New(f, "/Users/x/.claude/projects")
+	r := New(f, "/Users/x/.claude/projects", t.TempDir())
 	got, err := r.Procs(context.Background())
 	if err != nil {
 		t.Fatalf("Procs: %v", err)
@@ -81,7 +82,7 @@ func TestProcsDerivesStartedAtFromElapsed(t *testing.T) {
 		"ps -axo pid,tty,etime,command": {Stdout: []byte(ps)},
 	}}
 	now := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
-	r := New(f, "/Users/x/.claude/projects")
+	r := New(f, "/Users/x/.claude/projects", t.TempDir())
 	r.now = func() time.Time { return now }
 
 	got, err := r.Procs(context.Background())
@@ -118,7 +119,7 @@ func TestAssignGivesDistinctSessionsToPanesSharingACWD(t *testing.T) {
 	writeTranscript(t, projectDir, "sess-early", base.Add(2*time.Second))
 	writeTranscript(t, projectDir, "sess-late", base.Add(time.Hour+2*time.Second))
 
-	r := New(nil, root)
+	r := New(nil, root, t.TempDir())
 	got := r.Assign([]PaneProc{
 		{PaneID: 1, CWD: cwd, StartedAt: base},
 		{PaneID: 2, CWD: cwd, StartedAt: base.Add(time.Hour)},
@@ -146,7 +147,7 @@ func TestAssignLeavesSurplusPanesUnassigned(t *testing.T) {
 	base := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
 	writeTranscript(t, projectDir, "only-sess", base.Add(2*time.Second))
 
-	r := New(nil, root)
+	r := New(nil, root, t.TempDir())
 	got := r.Assign([]PaneProc{
 		{PaneID: 1, CWD: cwd, StartedAt: base},
 		{PaneID: 2, CWD: cwd, StartedAt: base.Add(time.Hour)},
@@ -171,7 +172,7 @@ func TestAssignIgnoresSessionsPredatingThePane(t *testing.T) {
 	base := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
 	writeTranscript(t, projectDir, "yesterdays-sess", base.Add(-24*time.Hour))
 
-	r := New(nil, root)
+	r := New(nil, root, t.TempDir())
 	got := r.Assign([]PaneProc{{PaneID: 1, CWD: cwd, StartedAt: base}})
 
 	if len(got) != 0 {
@@ -191,7 +192,7 @@ func TestAssignHonoursExplicitResumeHint(t *testing.T) {
 	writeTranscript(t, projectDir, "resume-target", base.Add(-72*time.Hour))
 	writeTranscript(t, projectDir, "fresh-sess", base.Add(2*time.Second))
 
-	r := New(nil, root)
+	r := New(nil, root, t.TempDir())
 	got := r.Assign([]PaneProc{
 		{PaneID: 1, CWD: cwd, ResumeID: "resume-target", StartedAt: base},
 		{PaneID: 2, CWD: cwd, StartedAt: base},
@@ -216,7 +217,7 @@ func TestAssignDoesNotReuseAHintedSessionForABarePane(t *testing.T) {
 	base := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
 	writeTranscript(t, projectDir, "hinted-sess", base.Add(2*time.Second))
 
-	r := New(nil, root)
+	r := New(nil, root, t.TempDir())
 	got := r.Assign([]PaneProc{
 		{PaneID: 1, CWD: cwd, ResumeID: "hinted-sess", StartedAt: base},
 		{PaneID: 2, CWD: cwd, StartedAt: base},
@@ -245,7 +246,7 @@ func TestAssignIgnoresSubagentTranscripts(t *testing.T) {
 	mkdirAll(t, subDir)
 	writeTranscript(t, subDir, "subagent-sess", base.Add(time.Minute))
 
-	r := New(nil, root)
+	r := New(nil, root, t.TempDir())
 	got := r.Assign([]PaneProc{{PaneID: 1, CWD: cwd, StartedAt: base}})
 
 	if got[1].SessionID != "top-level-sess" {
@@ -257,7 +258,7 @@ func TestAssignIgnoresSubagentTranscripts(t *testing.T) {
 }
 
 func TestAssignMissingProjectDirYieldsNoAssignment(t *testing.T) {
-	r := New(nil, t.TempDir())
+	r := New(nil, t.TempDir(), t.TempDir())
 	got := r.Assign([]PaneProc{{PaneID: 1, CWD: "/nonexistent/cwd"}})
 	if len(got) != 0 {
 		t.Fatalf("assigned %v, want none for a cwd whose slug dir does not exist", got)
@@ -276,7 +277,7 @@ func TestAssignScopesSessionsToTheirOwnProjectDir(t *testing.T) {
 	writeTranscript(t, alphaDir, "alpha-sess", base.Add(2*time.Second))
 	writeTranscript(t, betaDir, "beta-sess", base.Add(2*time.Second))
 
-	r := New(nil, root)
+	r := New(nil, root, t.TempDir())
 	got := r.Assign([]PaneProc{
 		{PaneID: 1, CWD: "/Volumes/alpha", StartedAt: base},
 		{PaneID: 2, CWD: "/Volumes/beta", StartedAt: base},
@@ -320,5 +321,162 @@ func chtimes(t *testing.T, path string, at time.Time) {
 	t.Helper()
 	if err := os.Chtimes(path, at, at); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// writeRegistry writes Claude's per-process session record,
+// <sessionsDir>/<pid>.json, as a running claude maintains it.
+func writeRegistry(t *testing.T, sessionsDir string, pid int, sessionID string, startedAt time.Time) {
+	t.Helper()
+	body := `{"pid":` + strconv.Itoa(pid) + `,"sessionId":"` + sessionID + `","cwd":"/Volumes/proj","startedAt":` +
+		strconv.FormatInt(startedAt.UnixMilli(), 10) + `,"kind":"interactive"}`
+	writeFile(t, filepath.Join(sessionsDir, strconv.Itoa(pid)+".json"), body)
+}
+
+// The registry names the session a claude process is actually running, which
+// argv cannot: a bare `--resume` picker, a `--resume <name>`, or a later
+// /resume all leave argv saying nothing useful about the live session.
+func TestProcsReadsSessionIDFromRegistry(t *testing.T) {
+	ps := " 4321 pts/3     10:00 claude --resume\n" +
+		" 4322 pts/5     10:00 claude --resume my-named-session\n" +
+		" 4323 pts/6     10:00 claude\n"
+	f := &iexec.FakeRunner{Responses: map[string]iexec.FakeResponse{
+		"ps -axo pid,tty,etime,command": {Stdout: []byte(ps)},
+	}}
+	now := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	started := now.Add(-10 * time.Minute)
+	sessions := t.TempDir()
+	// Claude writes its record a few seconds to a few minutes after exec.
+	writeRegistry(t, sessions, 4321, "picked-sess", started.Add(3*time.Second))
+	writeRegistry(t, sessions, 4322, "named-sess-uuid", started.Add(2*time.Minute))
+
+	r := New(f, "/Users/x/.claude/projects", sessions)
+	r.now = func() time.Time { return now }
+	got, err := r.Procs(context.Background())
+	if err != nil {
+		t.Fatalf("Procs: %v", err)
+	}
+	if got["pts/3"].SessionID != "picked-sess" {
+		t.Errorf("pts/3 SessionID = %q, want picked-sess", got["pts/3"].SessionID)
+	}
+	if got["pts/5"].SessionID != "named-sess-uuid" {
+		t.Errorf("pts/5 SessionID = %q, want named-sess-uuid", got["pts/5"].SessionID)
+	}
+	if got["pts/6"].SessionID != "" {
+		t.Errorf("pts/6 SessionID = %q, want empty (no registry record)", got["pts/6"].SessionID)
+	}
+}
+
+// A record written before the process started belongs to an earlier process
+// that held the same pid, and must not be trusted.
+func TestProcsIgnoresRegistryRecordFromAReusedPID(t *testing.T) {
+	ps := " 4321 pts/3     10:00 claude\n"
+	f := &iexec.FakeRunner{Responses: map[string]iexec.FakeResponse{
+		"ps -axo pid,tty,etime,command": {Stdout: []byte(ps)},
+	}}
+	now := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	sessions := t.TempDir()
+	writeRegistry(t, sessions, 4321, "dead-process-sess", now.Add(-24*time.Hour))
+
+	r := New(f, "/Users/x/.claude/projects", sessions)
+	r.now = func() time.Time { return now }
+	got, err := r.Procs(context.Background())
+	if err != nil {
+		t.Fatalf("Procs: %v", err)
+	}
+	if got["pts/3"].SessionID != "" {
+		t.Fatalf("SessionID = %q, want empty (record predates the process)", got["pts/3"].SessionID)
+	}
+}
+
+func TestProcsFailsOnMalformedRegistryRecord(t *testing.T) {
+	ps := " 4321 pts/3     10:00 claude\n"
+	f := &iexec.FakeRunner{Responses: map[string]iexec.FakeResponse{
+		"ps -axo pid,tty,etime,command": {Stdout: []byte(ps)},
+	}}
+	sessions := t.TempDir()
+	writeFile(t, filepath.Join(sessions, "4321.json"), "{not json")
+
+	r := New(f, "/Users/x/.claude/projects", sessions)
+	if _, err := r.Procs(context.Background()); err == nil {
+		t.Fatal("Procs succeeded on a malformed registry record, want error")
+	}
+}
+
+func TestResumeIDFromArgvForms(t *testing.T) {
+	cases := map[string]string{
+		"claude --resume abc":                "abc",
+		"claude --resume=abc":                "abc",
+		"claude -r abc":                      "abc",
+		"claude --resume":                    "",
+		"claude --resume --model opus":       "",
+		"claude -r --verbose":                "",
+		"claude --resume abc --fork-session": "", // running a new forked session, not abc
+		"claude --fork-session -r abc":       "",
+	}
+	for cmd, want := range cases {
+		if got := resumeIDFromArgv(cmd); got != want {
+			t.Errorf("resumeIDFromArgv(%q) = %q, want %q", cmd, got, want)
+		}
+	}
+}
+
+// Reproduces a pane that resumed an old session through the picker: its own
+// transcript predates the process, so start-time matching alone handed it a
+// newer, unrelated transcript from the same cwd. The registry must win.
+func TestAssignPrefersRegistrySessionOverStartTimeMatching(t *testing.T) {
+	root := t.TempDir()
+	cwd := "/Volumes/proj"
+	projectDir := filepath.Join(root, SlugFor(cwd))
+	mkdirAll(t, projectDir)
+
+	base := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	writeTranscript(t, projectDir, "picked-old-sess", base.Add(-30*24*time.Hour))
+	writeTranscript(t, projectDir, "unrelated-newer-sess", base.Add(time.Hour))
+
+	r := New(nil, root, t.TempDir())
+	got := r.Assign([]PaneProc{{PaneID: 1, CWD: cwd, SessionID: "picked-old-sess", StartedAt: base}})
+
+	if got[1].SessionID != "picked-old-sess" {
+		t.Fatalf("SessionID = %q, want picked-old-sess", got[1].SessionID)
+	}
+}
+
+// The registry reflects the live session, so it outranks a stale argv hint
+// (e.g. the pane ran `claude --resume X` and later switched with /resume).
+func TestAssignPrefersRegistrySessionOverArgvHint(t *testing.T) {
+	root := t.TempDir()
+	cwd := "/Volumes/proj"
+	projectDir := filepath.Join(root, SlugFor(cwd))
+	mkdirAll(t, projectDir)
+
+	base := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	writeTranscript(t, projectDir, "argv-sess", base.Add(-time.Hour))
+	writeTranscript(t, projectDir, "live-sess", base.Add(-2*time.Hour))
+
+	r := New(nil, root, t.TempDir())
+	got := r.Assign([]PaneProc{{PaneID: 1, CWD: cwd, ResumeID: "argv-sess", SessionID: "live-sess", StartedAt: base}})
+
+	if got[1].SessionID != "live-sess" {
+		t.Fatalf("SessionID = %q, want live-sess", got[1].SessionID)
+	}
+}
+
+// A registry session whose transcript is absent (e.g. a fresh session that
+// has not written one yet) falls through to the next signal.
+func TestAssignFallsBackWhenRegistryTranscriptMissing(t *testing.T) {
+	root := t.TempDir()
+	cwd := "/Volumes/proj"
+	projectDir := filepath.Join(root, SlugFor(cwd))
+	mkdirAll(t, projectDir)
+
+	base := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	writeTranscript(t, projectDir, "argv-sess", base.Add(-time.Hour))
+
+	r := New(nil, root, t.TempDir())
+	got := r.Assign([]PaneProc{{PaneID: 1, CWD: cwd, ResumeID: "argv-sess", SessionID: "not-on-disk", StartedAt: base}})
+
+	if got[1].SessionID != "argv-sess" {
+		t.Fatalf("SessionID = %q, want argv-sess", got[1].SessionID)
 	}
 }

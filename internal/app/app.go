@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ssoriche/reclaude/internal/capture"
+	"github.com/ssoriche/reclaude/internal/daemon"
 	iexec "github.com/ssoriche/reclaude/internal/exec"
 	"github.com/ssoriche/reclaude/internal/restore"
 	"github.com/ssoriche/reclaude/internal/session"
@@ -27,6 +28,7 @@ func FileStamp(t time.Time) string { return t.UTC().Format("20060102T150405.000Z
 
 func stateDir(home string) string     { return filepath.Join(home, ".local", "state", "reclaude") }
 func projectsRoot(home string) string { return filepath.Join(home, ".claude", "projects") }
+func sessionsDir(home string) string  { return filepath.Join(home, ".claude", "sessions") }
 
 // StateDir returns stateDir rooted at the real user home.
 func StateDir() (string, error) {
@@ -44,6 +46,32 @@ func ProjectsRoot() (string, error) {
 		return "", fmt.Errorf("app: home dir: %w", err)
 	}
 	return projectsRoot(home), nil
+}
+
+// SessionsDir returns Claude's per-process session registry directory rooted
+// at the real user home.
+func SessionsDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("app: home dir: %w", err)
+	}
+	return sessionsDir(home), nil
+}
+
+// SystemdUnitPath returns where the systemd user unit lives:
+// $XDG_CONFIG_HOME/systemd/user/<unit>, defaulting XDG_CONFIG_HOME to
+// ~/.config. A relative XDG_CONFIG_HOME is invalid per the XDG spec and is
+// ignored, as systemd itself does.
+func SystemdUnitPath() (string, error) {
+	cfg := os.Getenv("XDG_CONFIG_HOME")
+	if !filepath.IsAbs(cfg) {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("app: home dir: %w", err)
+		}
+		cfg = filepath.Join(home, ".config")
+	}
+	return filepath.Join(cfg, "systemd", "user", daemon.UnitName), nil
 }
 
 // WeztermVersion runs `wezterm --version` and returns its trimmed output. A
@@ -82,9 +110,13 @@ func NewCapture(ctx context.Context, now time.Time) (*capture.Capture, *snapshot
 	if err != nil {
 		return nil, nil, err
 	}
+	sessions, err := SessionsDir()
+	if err != nil {
+		return nil, nil, err
+	}
 	run := iexec.OSRunner{}
 	client := wezterm.New(run)
-	resolver := session.New(run, projects)
+	resolver := session.New(run, projects, sessions)
 	weztermV, err := WeztermVersion(ctx)
 	if err != nil {
 		weztermV = ""
